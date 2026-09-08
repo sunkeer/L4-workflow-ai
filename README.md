@@ -82,6 +82,52 @@ cd /root/vllm_deploy && MODEL_PATH=/root/private_data/models/<模型名> \
 ```
 > 完整流程与验收命令集见 `skills/dcu-vllm-deploy/references/deploy_flow.md`。
 
+## 上线工具三：dtk-ai-package-search（DCU AI 生态包检索）
+
+### 工具作用
+把光源（SourceFind）镜像站的海光 DCU AI 生态包做成**本地可离线检索的索引**，
+输入包名直接拿到匹配当前 DTK / Python / torch 版本的 whl 直链与 `pip install` 命令。
+核心解决三类痛点：
+
+1. **官网只能一层层点，翻不动** —— 镜像站是 JS 驱动的文件服务，67 个包 × 多 DAS 目录，
+   找一个包要点五六次还得手动「生成直链」。本工具把整棵树抓成 `packages.json`（**67 个包 /
+   1268 个文件**，覆盖 DAS1.0~DAS1.8 及 `previous_release/` 历史版本），一条命令出结果。
+2. **版本错配导致装完就崩** —— DCU 生态包必须同时对上 DTK（`dtk2604`）、Python（`cp310`）、
+   torch（`torch271`）三个维度，装错的典型症状不是安装失败而是 `import` 报 `undefined symbol`
+   或 `torch.cuda.is_available()` 返回 `False`。工具支持 `--from-env` 直接读节点上的
+   `/opt/dtk/.info/version` 与 Python/torch 版本自动过滤，并在零结果时列出该包实际可用的组合，
+   不让人瞎猜。
+3. **DAS↔DTK 对应关系没有权威表** —— 从真实数据反推生成矩阵（`DAS1.8`↔`dtk2604`、
+   `DAS1.7`↔`dtk25042`……），并标注了 **DAS1.4 不存在**、`DAS1.2` 内混有 `dtk24041` 文件
+   这类容易踩的例外。
+
+典型用例：`「DTK 26.04 + Python 3.10 要装 vllm，给我命令」` → 一条命令出可直接粘贴的
+`pip install` 直链。
+
+### 上线时间
+- **2026-09-08**（由镜像站直链整理任务沉淀；索引与飞书文档
+  <https://lhui08qsvi.feishu.cn/wiki/ApPYwC4VCieN70kGpr2cqkQCnOe> 同源）
+
+### 复用方式
+```bash
+# 放入 skill 目录后即可让 Agent 调用；也可纯命令行使用：
+cd skills/dtk-ai-package-search
+
+python3 scripts/search.py --list-versions              # DAS ↔ DTK 对应关系
+python3 scripts/search.py --info deepspeed             # 某包的完整版本矩阵
+python3 scripts/search.py vllm --dtk 2604 --py 3.10 -f pip   # 出 pip 命令
+python3 scripts/search.py deepspeed --from-env -f pip  # 在 DCU 节点上自动匹配本机环境
+python3 scripts/search.py flash_attn --dtk 2604 -f wget      # 无网环境：先下载再拷贝
+
+python3 scripts/refresh_index.py && python3 scripts/gen_matrix.py  # 刷新索引 + 同步矩阵文档
+```
+> 版本矩阵见 `references/version_matrix.md`，安装顺序与坑点手册见 `references/install_guide.md`。
+
+> **逆向要点**（镜像站没有公开 API 文档）：目录列表接口是
+> `GET /api-static/file/ListFile?CategoryID=4&Path=<路径>`，参数是**大写 P 的 `Path`** ——
+> 写成小写 `path` 会被服务端静默忽略并永远返回根目录，极易误判成「接口不支持子目录」；
+> 成功时 `code` 返回字符串 `"success"` 而非 `0`。
+
 ## 目录结构
 ```
 L4-workflow-ai/
@@ -102,12 +148,28 @@ L4-workflow-ai/
         │   ├── dcu_platform_patch.py  # 平台探测补丁（pynvml/amdsmi 缺失）
         │   ├── sitecustomize.py       # spawn worker 补丁全局生效
         │   └── start_template.sh      # 参数化 vLLM 启动脚本（模型无关）
+    │   └── references/
+    │       ├── vram_estimation.md     # 显存估算公式与经验数值
+    │       ├── deploy_flow.md         # 完整流程 + 验收命令集
+    │       └── troubleshooting.md     # 坑点手册（A~F 六类，全实战）
+    └── dtk-ai-package-search/
+        ├── SKILL.md                  # skill 定义（对版本 → 检索 → 出命令 → 验证）
+        ├── data/
+        │   └── packages.json          # 生态包索引（67 包 / 1268 文件，约 750KB）
+        ├── scripts/
+        │   ├── search.py              # 检索主入口（含 --from-env 本机环境探测）
+        │   ├── refresh_index.py       # 从镜像站全量重建索引
+        │   └── gen_matrix.py          # 由索引生成版本矩阵文档
         └── references/
-            ├── vram_estimation.md     # 显存估算公式与经验数值
-            ├── deploy_flow.md         # 完整流程 + 验收命令集
-            └── troubleshooting.md     # 坑点手册（A~F 六类，全实战）
+            ├── version_matrix.md      # DAS↔DTK↔Python 矩阵（自动生成，勿手改）
+            └── install_guide.md       # 安装顺序、验证脚本、7 类常见坑
 ```
 
 ## 说明
 - `feishu-doc-write` 是飞书连接器 `lark-doc` skill 的「高层封装」，固定了最稳的写入路径；更底层的块格式与全量参数见飞书连接器自带 `lark-doc` skill。
 - `dcu-vllm-deploy` 沉淀自 2026-09-08 的 MinerU2.5-Pro DCU 部署（vLLM 路线）与 PP-OCRv6（非 vLLM 架构判定为 ONNX 路线），流程边界经过两个案例验证。
+- `dtk-ai-package-search` 的 `data/packages.json` 是**快照而非实时数据**，头部 `generated_at`
+  即时效；与官网对不上时先跑 `refresh_index.py`。`version_matrix.md` 由脚本生成，改数据后
+  记得重跑 `gen_matrix.py` 同步。
+- 三个 skill 的关系：`dtk-ai-package-search` 负责「装什么版本」，`dcu-vllm-deploy` 负责
+  「怎么把服务跑起来」，`feishu-doc-write` 负责「把结论沉淀成团队文档」。
