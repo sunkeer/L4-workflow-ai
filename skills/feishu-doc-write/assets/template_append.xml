@@ -1,0 +1,34 @@
+<!-- 飞书文档「追加」片段模板：复制后替换占位符，存为 content.xml，再用
+     lark-cli docs +update --doc <DOC_URL> --command append --content @./content.xml
+     追加。注意：追加不要带 <title>，从 <h1> 起即可。 -->
+<h1 seq="auto">章节标题</h1>
+<p>普通段落文字，可用 <b>加粗</b>、<em>斜体</em>、<span>行内</span>；特殊字符转义：A &amp; B、1 &lt; 2。</p>
+
+<h2 seq="auto">子章节</h2>
+<ol>
+  <li>步骤一</li>
+  <li>步骤二<ul><li>子项说明</li></ul></li>
+</ol>
+
+<callout emoji="⚠️" background-color="light-red" border-color="red">
+  <p>高亮提醒块：只放 p / 列表 / 行内标签，不要放表格或代码块。</p>
+</callout>
+
+<h2 seq="auto">对比表</h2>
+<table>
+  <colgroup><col width="240"/><col width="240"/><col width="240"/></colgroup>
+  <thead>
+    <tr>
+      <th background-color="light-gray"><p>指标</p></th>
+      <th background-color="light-gray"><p>参考 A</p></th>
+      <th background-color="light-gray"><p>本次复现</p></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td><p>s/step</p></td><td><p>__VAL_A__</p></td><td><p>__VAL_B__</p></td></tr>
+    <tr><td><p>samples/s</p></td><td><p>__VAL_A__</p></td><td><p>__VAL_B__</p></td></tr>
+  </tbody>
+</table>
+
+<h2 seq="auto">关键命令</h2>
+<pre lang="bash" caption="启动训练"><code>bash run_train.sh</code></pre>
