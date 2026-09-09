@@ -17,6 +17,40 @@
   - sitecustomize 绝不能抛异常（未装 vLLM 的解释器会全局炸）
   - 不能用环境变量做「已 patch」标记——spawn 子进程会继承环境变量导致跳过
 
+### A3. `AttributeError: '_OpNamespace' '_C' object has no attribute 'cutlass_scaled_mm_supports_fp8'`
+- **现象**：服务还没起来就崩，栈底是
+  `quantization/utils/w8a8_utils.py:94  CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()`
+  → `_custom_ops.py:723  torch.ops._C.cutlass_scaled_mm_supports_fp8(capability)`。
+- **根因**：das 版 vLLM 的 `_C.abi3.so` **没有编译 NVIDIA CUTLASS 算子**（DCU 无 FP8
+  单元，移植时省掉了）。实测 `import vllm._C` 后
+  `[n for n in dir(torch.ops._C) if 'cutlass' in n.lower()]` 仍为 `[]`。
+  而 `w8a8_utils.py` 在**模块级**（import 期）就做能力探测：
+  ```python
+  def cutlass_fp8_supported():
+      if not current_platform.is_cuda():
+          return False          # rocm 平台安全
+      return ops.cutlass_scaled_mm_supports_fp8(capability)   # is_cuda() 为真 → 崩
+  ```
+- **解法（双保险，两件都要做）**：
+  1. `dcu_cutlass_patch.py`：给 `torch._ops._OpNamespace.__getattr__` 打兜底，
+     缺失的 `cutlass*` 且名字含 `support`（能力探测类）返回恒 False 桩。
+     语义正确（DCU 确实不支持），且**刻意不兜底真计算算子**，避免藏错。
+  2. 平台锁 `RocmPlatform`，让 `is_cuda()` 为 False，根本不进这条路径。
+- **排查提示**：日志里 `Automatically detected platform cuda.` 有欺骗性——vLLM
+  打印的是**插件键名**（我们把 builtin 的 `cuda` 键改写了），不是平台类名。
+  要确认真实平台，打印 `type(current_platform).__name__` 与 `is_cuda()`。
+  实测：键 cuda → `RocmPlatform`(is_cuda False)；`VLLM_DCU_PLATFORM=cuda` →
+  `NonNvmlCudaPlatform`(is_cuda True，正是踩坑那个)。
+
+### A4. `ValueError: Free memory on device (X/Y GiB) ... less than desired GPU memory utilization`
+- **根因**：同一张卡上**已经有另一个 vLLM 实例**在跑（常见于重复执行 start.sh，
+  或 SSH 里 `&` 后台启动后又用 nohup 起了一个）。1.2B 模型 + `gpu_util=0.9`
+  在 64GiB 卡上要 57.59GiB，第二个实例只剩 5.73GiB → 必然失败。
+- **解法**：`ps -eo pid,ppid,etime,cmd | grep '[v]llm.entrypoints'` 确认实例数，
+  只保留一个。清理时注意 **`pkill -f 'VLLM::EngineCore'` 会匹配到 pkill 自己所在的
+  shell 命令行并把它杀掉**（自杀导致后续命令全不执行），用
+  `pkill -f '[V]LLM::EngineCore'` 的括号写法规避。
+
 ## B. DTK 环境类
 
 ### B1. `libgalaxyhip.so.5: cannot open shared object file`
