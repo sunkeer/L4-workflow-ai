@@ -137,6 +137,83 @@ python3 scripts/refresh_index.py && python3 scripts/gen_matrix.py  # 刷新索�
 
 ---
 
+## 上线工具四：vllm-pooling-model-adapter（embedding 模型接入 vLLM 池化 runner）
+
+### 工具作用
+把任意 HuggingFace 的 **embedding / 向量检索 / 多模态检索**模型接进 vLLM 的 `pooling`
+runner，跑成 OpenAI 兼容的 `/v1/embeddings` 服务。核心解决两类痛点：
+
+1. **模型认不出来** —— HF 上大量 `xxxForEmbedding` 自定义类名不在 vLLM registry 里，
+   `vllm serve` 直接报「Model architectures not supported」。但这些模型往往是
+   「同家族生成模型 + 一个池化头」，权重完全同构。本工具给出**不改权重、不改结构**的
+   适配法：子类化 + `is_pooling_model` 标记 + `DispatchPooler.for_embedding` + registry 注册，
+   再用 `sitecustomize.py` 让 EngineCore 的 spawn 子进程也生效。
+2. **向量算出来不对，但服务不报错** —— 池化位置、prompt 构造、归一化任何一处对不上，
+   服务照常返回 200，精度悄悄掉。本工具给一套**四层数值对齐法**
+   （模型&池化 → prompt 构造 → 池化位置 → 误差量级），每层把问题锁在一个环节，
+   不用对着最终向量瞎猜。
+
+典型用例：`「Trident-Qwen3VL-2B 用 vLLM 部署成 embedding 服务」` —— 适配模块 + 启动参数
++ 对拍脚本一条龙。
+
+### 上线时间
+- **2026-10-27**（由国芯国模黑客松 T02 · Trident-Qwen3VL-2B 在 BW1000 + vLLM 0.29 适配沉淀）
+
+### 复用方式
+```bash
+# 0) 判型：能不能走这条路
+python3 scripts/check_model_embeddable.py <模型目录>
+
+# 1) 复制模板改三处（基类 / ARCH_NAME / 池化方式）
+cp assets/adapter_template.py adapter/my_pooling_adapter.py
+cp assets/sitecustomize.py   adapter/
+export PYTHONPATH=/path/to/adapter:$PYTHONPATH
+
+# 2) 起服务
+vllm serve <MODEL> --runner pooling \
+  --pooler-config '{"seq_pooling_type": "LAST"}' \
+  --max-model-len 32768 --no-trust-remote-code
+
+# 3) 四层对齐
+python3 scripts/numeric_align.py --path <MODEL> --model <SERVED_NAME>
+```
+
+> **头号坑**：vLLM 的 embedding 请求 `add_generation_prompt` **默认 False**，
+> 池化会落在用户轮结束符上。多数 embedding 模型要求 True。
+> 实测同一 prompt：不开余弦 0.764，开了 **0.9999**。请求里必须显式带上。
+>
+> **次坑**：`/tokenize` 接口默认是 True，所以「tokenize 结果和参考一致」**不能**证明
+> 真实推理时也一致——L2 和 L3 两层都要做。
+
+---
+
+## 上线工具五：dcu-vllm-backend-triage（DCU 上 vLLM attention 后端选型）
+
+### 工具作用
+诊断「DCU 上 vLLM 加载完权重、一跑推理就崩在 attention」这一类问题，一次定位到该用哪个
+`--attention-backend`。DTK 版 vLLM 常常缺几个编译期扩展，导致默认选中的后端不可用：
+
+| 现象 | 根因 |
+| --- | --- |
+| `AttributeError: '_OpNamespace' '_rocm_C' object has no attribute 'paged_attention'` | 缺 `vllm._rocm_C` → ROCM_ATTN 不可用 |
+| `AssertionError: FlashAttention version not detected` | 缺 `vllm_flash_attn`（**不是**系统里的 `flash_attn`，两个包） |
+| 两者都缺 | 用 `TRITON_ATTN`（纯 Triton，不依赖编译扩展） |
+
+### 上线时间
+- **2026-10-27**（BW1000 / DTK 26.04 / vLLM 0.29 实测：ROCM_ATTN ❌、FLASH_ATTN ❌、TRITON_ATTN ✅）
+
+### 复用方式
+```bash
+python3 scripts/probe_attention_backends.py            # 体检 + 给建议
+vllm serve <MODEL> ... --attention-backend TRITON_ATTN
+```
+
+> 注意与 `dcu-vllm-deploy` 里的 `dcu_cutlass_patch.py` 区分：那个是 **import 期**的
+> `cutlass_*_supported()` 能力探测崩（量化路径），本工具是**推理期**的 attention 后端崩。
+> 两者报错长得像（都是 `'_OpNamespace' '_C'`），但时机、算子、位置完全不同。
+
+---
+
 ## 目录结构
 ```
 L4-workflow-ai/
@@ -162,17 +239,29 @@ L4-workflow-ai/
     │       ├── vram_estimation.md     # 显存估算公式与经验数值
     │       ├── deploy_flow.md         # 完整流程 + 验收命令集
     │       └── troubleshooting.md      # 坑点手册（A~F 六类，全实战）
-    └── dtk-ai-package-search/
-        ├── SKILL.md                  # skill 定义（对版本 → 检索 → 出命令 → 验证）
-        ├── data/
-        │   └── packages.json          # 生态包索引（67 包 / 1268 文件，约 750KB）
-        ├── scripts/
-        │   ├── search.py              # 检索主入口（含 --from-env 本机环境探测）
-        │   ├── refresh_index.py       # 从镜像站全量重建索引
-        │   └── gen_matrix.py          # 由索引生成版本矩阵文档
-        └── references/
-            ├── version_matrix.md      # DAS↔DTK↔Python 矩阵（自动生成，勿手改）
-            └── install_guide.md       # 安装顺序、验证脚本、7 类常见坑
+    ├── dtk-ai-package-search/
+    │   ├── SKILL.md                  # skill 定义（对版本 → 检索 → 出命令 → 验证）
+    │   ├── data/
+    │   │   └── packages.json          # 生态包索引（67 包 / 1268 文件，约 750KB）
+    │   ├── scripts/
+    │   │   ├── search.py              # 检索主入口（含 --from-env 本机环境探测）
+    │   │   ├── refresh_index.py       # 从镜像站全量重建索引
+    │   │   └── gen_matrix.py          # 由索引生成版本矩阵文档
+    │   └── references/
+    │       ├── version_matrix.md      # DAS↔DTK↔Python 矩阵（自动生成，勿手改）
+    │       └── install_guide.md       # 安装顺序、验证脚本、7 类常见坑
+    ├── vllm-pooling-model-adapter/
+    │   ├── SKILL.md                  # 判型 → 选基类 → 写适配 → 注册 → 四层对齐
+    │   ├── assets/
+    │   │   ├── adapter_template.py    # 适配模块模板（改三处即用）
+    │   │   └── sitecustomize.py       # 让 spawn 子进程也注册到 vLLM registry
+    │   └── scripts/
+    │       ├── check_model_embeddable.py  # 判型：该不该走这条路
+    │       └── numeric_align.py           # L1~L4 数值对齐
+    └── dcu-vllm-backend-triage/
+        ├── SKILL.md                  # 判定树 + 后端对照表 + 与 cutlass 坑的区分
+        └── scripts/
+            └── probe_attention_backends.py  # 扩展体检 + 后端建议
 ```
 
 ## 说明
